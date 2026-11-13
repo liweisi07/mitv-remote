@@ -1,0 +1,13 @@
+appname=mitvremote
+version=1.0.0
+display_name=小米电视遥控
+desc=用 ADB 控制同一局域网内的小米电视：手机浏览器打开就是遥控器，可发电源、音量、换台、方向、确认、返回、主页、菜单、信号源、静音等按键；关机状态下可发局域网唤醒（WoL）开机。支持扫描网段发现电视。只在局域网内使用。
+source=thirdparty
+platform=arm
+maintainer=mitvremote
+desktop_uidir=ui
+desktop_applaunchname=mitvremote.main
+service_port=18091
+checkport=true
+ctl_stop=true
+changelog=1.0.0：首版——ADB 遥控（电源/音量/换台/方向盘/确认/返回/主页/菜单/信号源/静音）、局域网唤醒开机、网段扫描发现电视、手机 PWA 遥控器。

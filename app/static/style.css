@@ -1,0 +1,124 @@
+/* 小米电视遥控 — 手机优先 */
+* { box-sizing: border-box; }
+html, body { margin: 0; padding: 0; }
+body {
+  font-family: system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
+  background: #101828; color: #f2f4f7; min-height: 100vh;
+  -webkit-tap-highlight-color: transparent;
+}
+.topbar {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 12px 16px; background: #1d2939; position: sticky; top: 0; z-index: 10;
+}
+.topbar h1 { font-size: 18px; margin: 0; }
+.topbar a { color: #d0d5dd; text-decoration: none; font-size: 15px; padding: 6px 8px; }
+.page { max-width: 480px; margin: 0 auto; padding: 12px 14px 40px; }
+.hidden { display: none !important; }
+.muted { color: #98a2b3; font-size: 13px; line-height: 1.6; }
+.error {
+  background: #7a271a; color: #fecdca; border-radius: 10px;
+  padding: 10px 12px; margin: 10px 0; font-size: 14px; line-height: 1.6;
+}
+.ok-msg {
+  background: #054f31; color: #a6f4c5; border-radius: 10px;
+  padding: 10px 12px; margin: 10px 0; font-size: 14px; line-height: 1.6;
+}
+.card {
+  background: #1d2939; border-radius: 14px; padding: 16px; margin-bottom: 14px;
+}
+.card h2 { font-size: 16px; margin: 0 0 10px; }
+.status { display: flex; align-items: center; gap: 10px; }
+.dot { width: 12px; height: 12px; border-radius: 50%; background: #667085; flex: none; }
+.dot.on { background: #12b76a; }
+.dot.warn { background: #f79009; }
+.dot.off { background: #f04438; }
+.status-text { font-size: 15px; line-height: 1.5; }
+.status-sub { font-size: 13px; color: #98a2b3; margin-top: 2px; }
+
+/* 遥控器 */
+.remote { text-align: center; }
+.power-row { display: flex; gap: 12px; justify-content: center; margin-bottom: 18px; }
+.btn-power {
+  width: 76px; height: 76px; border-radius: 50%; border: none;
+  background: #d92d20; color: #fff; font-size: 30px; cursor: pointer;
+  box-shadow: 0 4px 14px rgba(217, 45, 32, .45);
+}
+.btn-power:active { transform: scale(.94); background: #b42318; }
+.btn-power:disabled { opacity: .45; box-shadow: none; }
+.btn-wake {
+  align-self: center; height: 48px; padding: 0 18px; border-radius: 24px;
+  border: 1px solid #344054; background: #233244; color: #f2f4f7;
+  font-size: 15px; cursor: pointer;
+}
+.btn-wake:active { transform: scale(.96); }
+.btn-wake:disabled { opacity: .45; }
+
+.dpad {
+  display: grid; grid-template-columns: repeat(3, 76px);
+  grid-template-rows: repeat(3, 64px); gap: 8px; justify-content: center;
+  margin: 6px auto 20px;
+}
+.dpad button {
+  border: 1px solid #344054; background: #233244; color: #f2f4f7;
+  border-radius: 14px; font-size: 24px; cursor: pointer;
+}
+.dpad button:active { transform: scale(.94); background: #2e475e; }
+.dpad .ok {
+  background: #175cd3; border-color: #175cd3; font-size: 17px; font-weight: 600;
+}
+.dpad .ok:active { background: #1849a9; }
+.dpad button:disabled { opacity: .45; }
+
+.side-cols { display: flex; gap: 16px; justify-content: center; margin-bottom: 20px; }
+.side-col { display: flex; flex-direction: column; gap: 8px; align-items: center; }
+.side-col .lbl { font-size: 13px; color: #98a2b3; }
+.side-col button {
+  width: 76px; height: 56px; border-radius: 14px; font-size: 22px;
+  border: 1px solid #344054; background: #233244; color: #f2f4f7; cursor: pointer;
+}
+.side-col button:active { transform: scale(.94); background: #2e475e; }
+.side-col button:disabled { opacity: .45; }
+
+.row-btns { display: flex; flex-wrap: wrap; gap: 10px; justify-content: center; }
+.row-btns button {
+  flex: 1 1 30%; min-width: 90px; height: 52px; border-radius: 12px;
+  border: 1px solid #344054; background: #233244; color: #f2f4f7;
+  font-size: 15px; cursor: pointer;
+}
+.row-btns button:active { transform: scale(.95); background: #2e475e; }
+.row-btns button:disabled { opacity: .45; }
+
+/* 表单 */
+.field { margin-bottom: 12px; }
+.field label { display: block; font-size: 14px; color: #d0d5dd; margin-bottom: 6px; }
+.field input {
+  width: 100%; height: 44px; padding: 0 12px; border-radius: 10px;
+  border: 1px solid #344054; background: #101828; color: #f2f4f7; font-size: 16px;
+}
+.field input:focus { outline: none; border-color: #175cd3; }
+.field .hint { font-size: 12px; color: #98a2b3; margin-top: 4px; line-height: 1.5; }
+.btn {
+  height: 46px; padding: 0 20px; border-radius: 10px; border: none;
+  background: #175cd3; color: #fff; font-size: 16px; cursor: pointer;
+}
+.btn:active { transform: scale(.97); }
+.btn:disabled { opacity: .5; }
+.btn.ghost { background: #233244; border: 1px solid #344054; }
+.btn-row { display: flex; gap: 10px; flex-wrap: wrap; }
+.btn-row .btn { flex: 1; }
+.help { font-size: 14px; line-height: 1.8; color: #d0d5dd; }
+.help ol { margin: 6px 0; padding-left: 22px; }
+.help li { margin-bottom: 4px; }
+.dev-list { margin-top: 10px; }
+.dev-item {
+  display: flex; align-items: center; justify-content: space-between; gap: 10px;
+  background: #101828; border: 1px solid #344054; border-radius: 10px;
+  padding: 10px 12px; margin-bottom: 8px; font-size: 14px; line-height: 1.5;
+}
+.dev-item .ip { font-weight: 600; }
+.dev-item .model { color: #98a2b3; font-size: 13px; }
+.dev-item button {
+  flex: none; height: 36px; padding: 0 14px; border-radius: 8px;
+  border: none; background: #175cd3; color: #fff; font-size: 14px; cursor: pointer;
+}
+footer { text-align: center; color: #667085; font-size: 12px; margin-top: 20px; }

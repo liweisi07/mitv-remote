@@ -1,0 +1,76 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#101828">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<link rel="stylesheet" href="/static/style.css">
+<link rel="manifest" href="/manifest.json">
+<link rel="apple-touch-icon" href="/icons/icon-192.png">
+<title>小米电视遥控</title>
+</head>
+<body>
+<header class="topbar"><h1>📺 小米电视遥控</h1><a href="/settings">⚙️ 设置</a></header>
+<main class="page">
+  <div class="card">
+    <div class="status">
+      <span class="dot" id="status-dot"></span>
+      <div>
+        <div class="status-text" id="status-text">正在连接…</div>
+        <div class="status-sub" id="status-sub"></div>
+      </div>
+    </div>
+  </div>
+  <div id="msg" class="error hidden"></div>
+  <div id="okmsg" class="ok-msg hidden"></div>
+
+  <div class="card remote">
+    <div class="power-row">
+      <button class="btn-power" id="btn-power" type="button" title="电源" aria-label="电源">⏻</button>
+      <button class="btn-wake" id="btn-wake" type="button">⏻ 开机（局域网唤醒）</button>
+    </div>
+    <div class="dpad">
+      <span></span>
+      <button type="button" data-key="up" aria-label="上">▲</button>
+      <span></span>
+      <button type="button" data-key="left" aria-label="左">◀</button>
+      <button type="button" class="ok" data-key="ok" aria-label="确认">确认</button>
+      <button type="button" data-key="right" aria-label="右">▶</button>
+      <span></span>
+      <button type="button" data-key="down" aria-label="下">▼</button>
+      <span></span>
+    </div>
+    <div class="side-cols">
+      <div class="side-col">
+        <span class="lbl">音量</span>
+        <button type="button" data-key="vol_up" aria-label="音量加">＋</button>
+        <button type="button" data-key="vol_down" aria-label="音量减">－</button>
+      </div>
+      <div class="side-col">
+        <span class="lbl">换台</span>
+        <button type="button" data-key="ch_up" aria-label="换台加">＋</button>
+        <button type="button" data-key="ch_down" aria-label="换台减">－</button>
+      </div>
+    </div>
+    <div class="row-btns">
+      <button type="button" data-key="back">↩ 返回</button>
+      <button type="button" data-key="home">⌂ 主页</button>
+      <button type="button" data-key="menu">☰ 菜单</button>
+      <button type="button" data-key="input">📺 信号源</button>
+      <button type="button" data-key="mute">🔇 静音</button>
+    </div>
+  </div>
+  <div class="card">
+    <div class="btn-row">
+      <button class="btn ghost" id="btn-test" type="button">测试连接</button>
+      <button class="btn ghost" id="btn-logout" type="button">退出登录</button>
+    </div>
+    <p class="muted" style="margin:12px 0 0;">点按即发命令。电视关机后点“开机”先发局域网唤醒包，等几秒再点“测试连接”确认。首次连接要在电视上点“允许 USB 调试”。</p>
+  </div>
+  <footer id="version"></footer>
+</main>
+<script src="/static/remote.js"></script>
+</body>
+</html>

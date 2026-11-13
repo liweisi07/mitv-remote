@@ -1,0 +1,84 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#101828">
+<link rel="stylesheet" href="/static/style.css">
+<title>设置 — 小米电视遥控</title>
+</head>
+<body>
+<header class="topbar"><h1>⚙️ 设置</h1><a href="/">📺 遥控器</a></header>
+<main class="page">
+  <div id="msg" class="error hidden"></div>
+  <div id="okmsg" class="ok-msg hidden"></div>
+
+  <div class="card">
+    <h2>电视设置</h2>
+    <div class="field">
+      <label for="tv-name">电视名称</label>
+      <input type="text" id="tv-name" placeholder="小米电视" maxlength="32">
+    </div>
+    <div class="field">
+      <label for="tv-ip">电视 IP 地址</label>
+      <input type="text" id="tv-ip" placeholder="如 192.168.1.10" inputmode="decimal" autocomplete="off">
+      <div class="hint">电视的局域网 IP：电视 → 设置 → 网络 → 查看，或用下面“发现电视”扫描。</div>
+    </div>
+    <div class="field">
+      <label for="tv-port">ADB 端口</label>
+      <input type="text" id="tv-port" placeholder="5555" inputmode="numeric" autocomplete="off">
+      <div class="hint">默认 5555，改过 ADB 端口才需要改。</div>
+    </div>
+    <div class="field">
+      <label for="tv-mac">电视 MAC 地址（局域网唤醒用）</label>
+      <input type="text" id="tv-mac" placeholder="如 AA:BB:CC:DD:EE:FF" autocomplete="off">
+      <div class="hint">电视 → 设置 → 关于本机 → 状态信息里看，或路由器后台查。没有 MAC 也能遥控，只是开不了机。</div>
+    </div>
+    <div class="btn-row">
+      <button class="btn" id="btn-save" type="button">保存</button>
+      <button class="btn ghost" id="btn-test" type="button">测试连接</button>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>发现电视</h2>
+    <p class="muted" style="margin:0 0 10px;">扫描本机所在网段的 ADB 端口（5555），列出响应的设备，点“填入”把 IP 写进上面。</p>
+    <button class="btn ghost" id="btn-discover" type="button" style="width:100%;">开始扫描</button>
+    <div id="dev-list" class="dev-list"></div>
+  </div>
+
+  <div class="card">
+    <h2>怎么开 ADB（只做一次）</h2>
+    <div class="help">
+      <ol>
+        <li>电视上：设置 → 关于本机 → 连点“版本号”7 下，提示“已进入开发者模式”。</li>
+        <li>回到设置 → 开发者选项（或“系统 → 开发者选项”）→ 打开“ADB 调试”。</li>
+        <li>回遥控器点“测试连接”：电视上会弹出“允许 USB 调试？”的框，点“允许”（可勾“始终允许这台计算机”），再点一次测试连接，应显示“已连接”。</li>
+        <li>如果测试一直显示“连接被拒”：确认 ADB 调试已开、电视和 NAS 在同一个网段、IP 没填错。</li>
+      </ol>
+      <p>注意：小米电视如果没有开发者选项或开不了 ADB 调试，本应用无法使用（电视厂商锁死了这条路）。局域网唤醒只在电视待机不断电、且支持网络唤醒时有效；彻底断电关机后唤不醒。</p>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>账号密码</h2>
+    <div class="field">
+      <label for="cur-pass">当前密码</label>
+      <input type="password" id="cur-pass" autocomplete="current-password">
+    </div>
+    <div class="field">
+      <label for="new-user">新账号（留空只改密码）</label>
+      <input type="text" id="new-user" autocomplete="username" maxlength="32">
+    </div>
+    <div class="field">
+      <label for="new-pass">新密码</label>
+      <input type="password" id="new-pass" autocomplete="new-password">
+      <div class="hint">忘密码：删数据目录 config.json 里的 auth 段，重启应用恢复默认 admin/admin。</div>
+    </div>
+    <button class="btn" id="btn-pass" type="button" style="width:100%;">修改账号密码</button>
+  </div>
+  <footer>小米电视遥控 · 只在局域网内使用，不要把端口映射到公网</footer>
+</main>
+<script src="/static/settings.js"></script>
+</body>
+</html>
