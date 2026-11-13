@@ -44,6 +44,7 @@ let fetchCalls = [];
 let shotDeferred = null; // 当前挂起的 screenshot fetch（可控）
 let connected = false;   // /api/status 返回的状态
 let shotMode = 'ok';     // ok | error
+let keyOk = true;        // /api/key 返回的 ok
 
 function shotCalls() {
   return fetchCalls.filter((u) => u === '/api/screenshot').length;
@@ -51,6 +52,12 @@ function shotCalls() {
 function timerByMs(ms) {
   for (const id of Object.keys(timers)) {
     if (timers[id].ms === ms) return timers[id];
+  }
+  return null;
+}
+function timerIdByMs(ms) {
+  for (const id of Object.keys(timers)) {
+    if (timers[id].ms === ms) return id;
   }
   return null;
 }
@@ -84,7 +91,14 @@ async function main() {
         }
         if (url === '/api/version') {
           return Promise.resolve({
-            json: () => Promise.resolve({ version: '1.0.1', app: 'mitvremote' }),
+            json: () => Promise.resolve({ version: '1.0.2', app: 'mitvremote' }),
+          });
+        }
+        if (url === '/api/key') {
+          return Promise.resolve({
+            json: () => Promise.resolve(keyOk
+              ? { ok: true }
+              : { ok: false, error: '按键发送失败' }),
           });
         }
         if (url === '/api/screenshot') {
@@ -199,6 +213,80 @@ async function main() {
   statusTimer().fn();
   await settle();
   check('断开后保留最后一张图', !shotImg.classList.contains('hidden'));
+
+  // 11. 按键成功后立刻刷新一次截图（1.0.2）
+  const keyBtn = document.querySelector('[data-key="up"]');
+  check('测试用的按键按钮存在', !!keyBtn);
+
+  // 11a. 重新连上：状态刷新后立即取一张
+  connected = true;
+  statusTimer().fn();
+  await settle();
+  const callsAfterReconnect = shotCalls();
+  check('重连后立即取一张截图', callsAfterReconnect === 7, 'calls=' + callsAfterReconnect);
+  shotDeferred.resolve();
+  await settle();
+
+  // 11b. 按键成功：不等 2 秒定时器，立刻多取一张；计时器被重置（旧 id 消失、新 id 出现）
+  const timerIdBefore = timerIdByMs(2000);
+  const callsBeforeKey = shotCalls();
+  keyBtn.click();
+  await settle();
+  check('按键成功后立刻多取一张截图', shotCalls() === callsBeforeKey + 1,
+    'calls=' + shotCalls() + ' before=' + callsBeforeKey);
+  const timerIdAfter = timerIdByMs(2000);
+  check('按键后 2 秒计时器被重置', !!timerIdBefore && !!timerIdAfter && timerIdBefore !== timerIdAfter,
+    'before=' + timerIdBefore + ' after=' + timerIdAfter);
+  check('旧计时器 id 已清除', !(timerIdBefore in timers), 'id=' + timerIdBefore);
+  shotDeferred.resolve();
+  await settle();
+
+  // 11c. 上一张截图还在取：按键后不重复发，计时器也不重置
+  shotTimer().fn(); // 再取一张（挂起）
+  await settle(3);
+  const callsInFlight = shotCalls();
+  const timerIdInFlight = timerIdByMs(2000);
+  keyBtn.click();
+  await settle();
+  check('上一张未回来时按键不重复取截图', shotCalls() === callsInFlight, 'calls=' + shotCalls());
+  check('上一张未回来时按键不重置计时器', timerIdByMs(2000) === timerIdInFlight,
+    'id=' + timerIdByMs(2000));
+  shotDeferred.resolve();
+  await settle();
+
+  // 11d. 暂停时：按键成功后仍立刻刷新一次，定时器保持停着
+  shotToggle.click(); // 暂停
+  check('暂停后 2 秒定时器已停', !shotTimer());
+  const callsBeforePausedKey = shotCalls();
+  keyBtn.click();
+  await settle();
+  check('暂停时按键仍立刻刷新一次', shotCalls() === callsBeforePausedKey + 1,
+    'calls=' + shotCalls());
+  check('暂停时按键后定时器仍停着', !shotTimer());
+  shotDeferred.resolve();
+  await settle();
+  shotToggle.click(); // 恢复，免得影响后续断言
+  await settle(3);
+  shotDeferred.resolve();
+  await settle();
+
+  // 11e. 按键失败：不刷新截图
+  keyOk = false;
+  const callsBeforeFailKey = shotCalls();
+  keyBtn.click();
+  await settle();
+  check('按键失败时不刷新截图', shotCalls() === callsBeforeFailKey, 'calls=' + shotCalls());
+  keyOk = true;
+
+  // 11f. 未连接：即使按键接口返回成功也不刷新截图
+  connected = false;
+  statusTimer().fn();
+  await settle();
+  const callsBeforeUnconnectedKey = shotCalls();
+  keyBtn.click();
+  await settle();
+  check('未连接时按键不刷新截图', shotCalls() === callsBeforeUnconnectedKey,
+    'calls=' + shotCalls());
 
   console.log('== 汇总：' + passed + '/' + (passed + failed) + ' 通过 ==');
   process.exit(failed ? 1 : 0);

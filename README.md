@@ -40,7 +40,7 @@
 
 ```sh
 scripts/build_fnpack.sh [arm|x86]   # 默认 arm，打包到 dist/
-python3 scripts/verify_fpk.py dist/mitvremote-1.0.1-arm64.fpk
+python3 scripts/verify_fpk.py dist/mitvremote-1.0.2-arm64.fpk
 ```
 
 ## 已知限制

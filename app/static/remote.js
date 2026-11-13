@@ -159,6 +159,20 @@
   function stopShotTimer() {
     if (shotTimer) { clearInterval(shotTimer); shotTimer = null; }
   }
+  function restartShotTimer() {
+    // 重置 2 秒计时：停掉旧的再起一个新的，下一张在按键后满 2 秒才取，
+    // 避免刚取完又立刻重复取一张。暂停时不重起（定时器本就停着）。
+    stopShotTimer();
+    if (!shotPaused) startShotTimer();
+  }
+  function refreshShotAfterKey() {
+    // 按键成功后立刻刷新一次电视画面：只在已连接时触发；
+    // 暂停只停定时器，不挡这一次（这是用户主动操作的结果，要看得到）。
+    if (lastState !== 'connected') return;
+    if (shotBusy) return; // 上一张还没回来，跳过，不堆积
+    restartShotTimer();
+    refreshShot(true);
+  }
   shotToggle.addEventListener('click', function () {
     shotPaused = !shotPaused;
     if (shotPaused) {
@@ -189,6 +203,8 @@
         buzz();
         if (data.ok) {
           refreshStatus();
+          // 按键成功后立刻刷新一次画面，不等 2 秒定时器。
+          refreshShotAfterKey();
         } else {
           showError(data.error || '按键发送失败');
           refreshStatus();
