@@ -67,8 +67,16 @@ class MockAdbServer:
     def __init__(self, mode):
         self.mode = mode
         self.commands = []  # 收到的 shell 命令
+        self.connections = 0  # 完成握手进入 shell 服务的 TCP 连接数
+        self._conn_lock = threading.Lock()
+        # mock 电视上的虚拟文件系统：路径 -> 内容（落文件截图用）
+        self.files = {}
+        self._files_lock = threading.Lock()
+        # 截图延迟（秒）：模拟真机 screencap 慢
+        self.screencap_delay = 0.0
         # 截图模式：ok（exec-out 返回合法 PNG）| fallback（exec 返回
-        # 垃圾，shell base64 兜底）| fail（两条路都拿不到合法 PNG）
+        # 垃圾，shell base64 兜底）| file_only（exec 与 base64 都失
+        # 效，只有落文件再读能拿到图）| fail（几条路都拿不到合法 PNG）
         self.screencap_mode = "ok"
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -139,6 +147,8 @@ class MockAdbServer:
                     return
             if not connected:
                 return
+            with self._conn_lock:
+                self.connections += 1
             # 4. shell 服务循环
             remote_id = 1
             while True:
@@ -167,20 +177,51 @@ class MockAdbServer:
                     if command.startswith("getprop ro.product.model"):
                         out = b"MiTV-MockModel\n"
                     elif command.startswith("screencap"):
+                        # 模拟真机 screencap 慢：回包前先睡一会儿
+                        if self.screencap_delay:
+                            time.sleep(self.screencap_delay)
                         if kind == "exec":
+                            # exec-out screencap -p
                             if self.screencap_mode == "ok":
                                 out = MOCK_PNG
                             elif self.screencap_mode == "fallback":
                                 out = b"not-a-png"
-                            else:  # fail
+                            else:  # fail / file_only
                                 out = b""
-                        else:  # shell: screencap -p | base64
-                            if self.screencap_mode == "fallback":
+                        elif "| base64" in command:
+                            # shell: screencap -p | base64
+                            if self.screencap_mode in ("fallback", "ok"):
                                 out = base64.b64encode(MOCK_PNG) + b"\n"
-                            elif self.screencap_mode == "fail":
+                            else:  # fail / file_only
                                 out = b""
-                            else:
-                                out = base64.b64encode(MOCK_PNG) + b"\n"
+                        else:
+                            # shell: screencap <path> 落文件（fail 模式写不出）
+                            path = command[len("screencap"):].strip()
+                            if self.screencap_mode != "fail" and path:
+                                with self._files_lock:
+                                    self.files[path] = MOCK_PNG
+                            out = b""
+                    elif (command.startswith("test -f ")
+                            and command.rstrip().endswith("&& echo OK")):
+                        path = command[len("test -f "):].split("&&")[0].strip()
+                        with self._files_lock:
+                            exists = path in self.files
+                        out = b"OK\n" if exists else b""
+                    elif command.startswith("base64 "):
+                        path = command[len("base64 "):].strip()
+                        with self._files_lock:
+                            data = self.files.get(path)
+                        out = (base64.b64encode(data) + b"\n") if data else b""
+                    elif command.startswith("cat ") and kind == "exec":
+                        path = command[len("cat "):].strip()
+                        with self._files_lock:
+                            data = self.files.get(path)
+                        out = data if data else b""
+                    elif command.startswith("rm -f "):
+                        path = command[len("rm -f "):].strip()
+                        with self._files_lock:
+                            self.files.pop(path, None)
+                        out = b""
                     else:
                         out = b""
                     conn.sendall(_adb_msg(WRTE, remote_id, local_id, out))
@@ -493,13 +534,16 @@ def test_screenshot(h, mock_auth):
                                           "screencap -p | base64"],
           str(mock_auth.commands[before:]))
     mock_auth.screencap_mode = "ok"
-    # 5. 两条路都失败：回 JSON 可读错误，不带堆栈
+    # 5. 三条路都失败：回 JSON 可读错误，写明三种方法各卡在哪，不带堆栈
     mock_auth.screencap_mode = "fail"
     status, raw = h.req("GET", "/api/screenshot")
     data = parse_json(raw)
-    check("截图失败回 JSON 可读错误",
+    check("截图失败回 JSON 可读错误（写明三种方法）",
           status == 503 and not data.get("ok") and data.get("error")
-          and "不是有效图片" in data.get("error", "")
+          and "截图失败" in data.get("error", "")
+          and "exec-out" in data.get("error", "")
+          and "base64" in data.get("error", "")
+          and "落文件" in data.get("error", "")
           and "Traceback" not in raw.decode("utf-8", "replace"),
           "status=%s %s" % (status, str(data)[:200]))
     mock_auth.screencap_mode = "ok"
@@ -551,6 +595,8 @@ def test_states(h, mock_auth, mock_never):
           str(data))
     check("refused 文案提到 ADB 没开",
           "ADB 没开" in data.get("error", ""), data.get("error", ""))
+    check("refused 文案提到遥控器开机可能复位 ADB",
+          "用遥控器开机后" in data.get("error", ""), data.get("error", ""))
     # awaiting_auth：mock 从不回应公钥，客户端应在 auth 超时后报等待点允许
     status, data = h.json("POST", "/api/settings",
                           {"tv_name": "客厅电视", "tv_ip": "127.0.0.1",
@@ -613,6 +659,80 @@ def test_power_on(h):
           str(data))
 
 
+def test_connection_reuse(h, mock_auth):
+    """1.0.3：按键与截图各用一条持久连接，互不干扰。"""
+    # 先把设置指回已授权 mock，并丢掉全部连接，从干净状态开始数
+    h.json("POST", "/api/settings",
+           {"tv_name": "客厅电视", "tv_ip": "127.0.0.1",
+            "tv_port": mock_auth.port, "tv_mac": "AA:BB:CC:DD:EE:FF"})
+    app._drop_all_devices()
+    before = mock_auth.connections
+    t0 = time.time()
+    for key in ("vol_up", "vol_down", "up", "down", "ok"):
+        ok, state, detail = app.send_key(key)
+        check("复用：按键 %s 成功" % key, ok, str(detail))
+    dt = time.time() - t0
+    check("复用：5 次按键只建 1 条连接",
+          mock_auth.connections - before == 1,
+          "connections=%d->%d" % (before, mock_auth.connections))
+    check("复用：5 次按键 2 秒内完成",
+          dt < 2.0, "%.2fs" % dt)
+    # 截图在途时按键不受阻：mock 截图拖 3 秒，后台取截图，主线程按键
+    mock_auth.screencap_delay = 3.0
+    before_cmds = len(mock_auth.commands)
+    shot_result = {}
+
+    def _shot():
+        shot_result["ret"] = app.take_screenshot()
+
+    th = threading.Thread(target=_shot, daemon=True)
+    th.start()
+    # 等截图命令确实发到 mock（在途），再按，避免按键抢在截图前面
+    deadline = time.time() + 10
+    while ("screencap -p" not in mock_auth.commands[before_cmds:]
+           and time.time() < deadline):
+        time.sleep(0.05)
+    check("隔离：截图请求已在途",
+          "screencap -p" in mock_auth.commands[before_cmds:],
+          str(mock_auth.commands[before_cmds:]))
+    t0 = time.time()
+    ok, state, detail = app.send_key("vol_up")
+    key_dt = time.time() - t0
+    check("隔离：截图在途时按键成功", ok, str(detail))
+    check("隔离：截图在途时按键 2 秒内返回（截图要 3 秒）",
+          key_dt < 2.0, "%.2fs" % key_dt)
+    th.join(timeout=30)
+    png, state, detail = shot_result.get("ret", (None, "?", "?"))
+    check("隔离：慢截图最终仍返回 PNG",
+          png == MOCK_PNG, "state=%s %s" % (state, detail))
+    mock_auth.screencap_delay = 0.0
+    # 截图失败不丢按键连接：fail 模式截图一次，再按键不应新建连接
+    mock_auth.screencap_mode = "fail"
+    png, state, detail = app.take_screenshot()
+    check("隔离：截图失败回错",
+          png is None and state == "error", "state=%s %s" % (state, detail))
+    before = mock_auth.connections
+    ok, state, detail = app.send_key("vol_up")
+    check("隔离：截图失败后按键成功", ok, str(detail))
+    check("隔离：截图失败后按键不新建连接",
+          mock_auth.connections - before == 0,
+          "connections=%d->%d" % (before, mock_auth.connections))
+    # 落文件兜底：exec 与 base64 都失效时，落文件再读能拿到图
+    mock_auth.screencap_mode = "file_only"
+    before_cmds = len(mock_auth.commands)
+    png, state, detail = app.take_screenshot()
+    cmds = mock_auth.commands[before_cmds:]
+    check("兜底：落文件方式拿到合法 PNG",
+          png == MOCK_PNG, "state=%s %s" % (state, detail))
+    check("兜底：走了落文件命令",
+          any(c.startswith("screencap /sdcard/") for c in cmds)
+          and any(c.startswith("test -f /sdcard/") for c in cmds),
+          str(cmds))
+    check("兜底：临时文件已清理",
+          not mock_auth.files, str(mock_auth.files))
+    mock_auth.screencap_mode = "ok"
+
+
 def main():
     print("== 单元：MAC / WoL ==")
     test_mac_wol()
@@ -638,6 +758,8 @@ def main():
     test_discover(h, mock_auth)
     print("== 开机测试 ==")
     test_power_on(h)
+    print("== 连接复用与隔离测试 ==")
+    test_connection_reuse(h, mock_auth)
     print("== 密钥文件 ==")
     check("ADB 密钥已持久化到数据目录",
           os.path.isfile(os.path.join(TMPDATA, "adbkey"))

@@ -58,7 +58,7 @@ STATIC_DIR = os.path.join(APP_DIR, "static")
 sys.path.insert(0, VENDOR_DIR)
 sys.path.insert(0, APP_DIR)
 
-VERSION = "1.0.2"
+VERSION = "1.0.3"
 APPNAME = "mitvremote"
 DEFAULT_PORT = 18091
 DEFAULT_ADB_PORT = 5555
@@ -91,12 +91,20 @@ KEY_EVENTS = {
 STATE_TEXT = {
     "not_configured": "未配置电视：请先在设置页填电视 IP",
     "connected": "已连接",
-    "refused": "连接被拒：电视 ADB 没开，或电视关机，或 IP 不对",
+    "refused": ("连接被拒：电视 ADB 没开，或电视关机，或 IP 不对。"
+                "用遥控器开机后 ADB 开关可能被复位，请在电视上重新开启"
+                " ADB 调试（设置 → 账号与安全 → ADB 调试 → 允许）"),
     "awaiting_auth": "请在电视上点“允许 USB 调试”（可勾“始终允许”），再点一次",
     "timeout": "连接超时：电视没有响应，请检查电视是否开机、是否在同一网段",
     "error": "连接出错",
     "unknown": "未测试连接",
 }
+
+# 小米固件提示：部分小米电视（实测系统版本 1.3.130）用遥控器开机
+# （哪怕只是待机唤醒）后 ADB 开关会被复位成拒绝，不是应用的问题；
+# 重新在电视上开一次 ADB 调试即可。见 README“电视重启后 ADB 被复位”。
+ADB_RESET_HINT = ("用遥控器开机后 ADB 开关可能被复位，请在电视上重新开启"
+                  " ADB 调试（设置 → 账号与安全 → ADB 调试 → 允许）")
 
 
 # --------------------------------------------------------------------------
@@ -473,7 +481,8 @@ def _adb_connect(host, port, auth_timeout_s=10.0, transport_timeout_s=5.0):
                        auth_callback=_auth_callback)
     except ConnectionRefusedError:
         return None, "refused", (
-            "连不上 %s:%s：电视 ADB 没开，或电视关机，或 IP 不对" % (host, port))
+            "连不上 %s:%s：电视 ADB 没开，或电视关机，或 IP 不对。"
+            "%s" % (host, port, ADB_RESET_HINT))
     except (socket.timeout, TimeoutError):
         return None, "timeout", "连接 %s:%s 超时" % (host, port)
     except adb_exc.AdbTimeoutError:
@@ -503,68 +512,105 @@ def _adb_connect(host, port, auth_timeout_s=10.0, transport_timeout_s=5.0):
     return device, "connected", ""
 
 
-# 持久连接：遥控按键复用同一条 ADB 连接，断了重连一次。
-_device_lock = threading.Lock()
-_device = None
-_device_target = (None, None)
+# --------------------------------------------------------------------------
+# ADB 连接层：按键与截图各用一条持久连接
+#
+# 为什么分两条：真机上单次 ADB 命令本身就慢（实测按键约 2 秒），截图
+# （screencap）更要 1–3 秒甚至超时。之前两路共用一条连接，截图一慢
+# 就拖住按键；截图一失败还会把共用连接丢掉，下一键又要重新握手——
+# 用户看到的就是“按一下键 2 秒才有反应、画面还加载不出来”。现在各
+# 用各的连接、各自加锁串行：截图再慢、再失败也挡不住按键，截图失败
+# 只丢截图连接，按键连接不受影响。按键通道复用一条连接（多次按键只
+# 建一次连接，断了重连一次），目标是单次按键压到 0.5 秒以内。
+# --------------------------------------------------------------------------
+
+def _log(message):
+    """服务端日志（stderr，飞牛上可在应用日志里看到，方便排障）。"""
+    sys.stderr.write("mitvremote: %s\n" % message)
+    try:
+        sys.stderr.flush()
+    except Exception:  # noqa: BLE001 - 日志写失败无所谓
+        pass
 
 
-def _get_device(host, port, auth_timeout_s=10.0):
-    """拿到可用的已连接设备；没有或目标变了就重连一次。"""
-    global _device, _device_target
-    with _device_lock:
-        if (_device is not None and _device_target == (host, port)
-                and getattr(_device, "available", False)):
-            return _device, "connected", ""
+class _AdbSlot:
+    """一条持久 ADB 连接：设备 + 目标 + 串行锁。
+
+    get/drop 假定调用方已持有 self.lock（整条命令的操作都在锁内完
+    成，避免两个线程同时在同一条连接上发命令）。
+    """
+
+    def __init__(self, name):
+        self.name = name
+        self.lock = threading.Lock()
+        self.device = None
+        self.target = (None, None)
+
+    def get(self, host, port, auth_timeout_s=10.0):
+        """拿到可用设备；没有或目标变了就重连一次。"""
+        if (self.device is not None and self.target == (host, port)
+                and getattr(self.device, "available", False)):
+            return self.device, "connected", ""
         device, state, detail = _adb_connect(host, port, auth_timeout_s)
         if device is not None:
-            _device = device
-            _device_target = (host, port)
+            self.device = device
+            self.target = (host, port)
         else:
-            _device = None
-            _device_target = (None, None)
+            self.device = None
+            self.target = (None, None)
         return device, state, detail
 
-
-def _drop_device():
-    global _device, _device_target
-    with _device_lock:
-        if _device is not None:
+    def drop(self):
+        """丢掉连接（下次再建）。"""
+        if self.device is not None:
             try:
-                _device.close()
+                self.device.close()
             except Exception:  # noqa: BLE001 - 关闭失败无所谓
                 pass
-        _device = None
-        _device_target = (None, None)
+        self.device = None
+        self.target = (None, None)
+
+
+_cmd_slot = _AdbSlot("按键")    # 按键 / 读型号 / 测试连接
+_shot_slot = _AdbSlot("截图")   # 截图（与按键完全隔离）
+
+
+def _drop_all_devices():
+    """丢掉全部连接（如改了电视 IP 后）。锁按固定顺序拿，避免死锁。"""
+    with _cmd_slot.lock:
+        _cmd_slot.drop()
+    with _shot_slot.lock:
+        _shot_slot.drop()
 
 
 def _run_shell_once(host, port, command, auth_timeout_s=10.0):
-    """取设备、跑一条 shell 命令。返回 (ok, state, detail, output)。"""
+    """按键通道跑一条 shell 命令。返回 (ok, state, detail, output)。"""
     from adb_shell import exceptions as adb_exc
-    device, state, detail = _get_device(host, port, auth_timeout_s)
-    if device is None:
-        return False, state, detail, ""
-    try:
-        out = device.shell(command, transport_timeout_s=5.0,
-                           read_timeout_s=5.0)
-        return True, "connected", "", out or ""
-    except (adb_exc.AdbConnectionError, adb_exc.AdbTimeoutError,
-            OSError):
-        # 连接断了：丢掉旧连接，重连一次再跑
-        _drop_device()
-        device, state, detail = _get_device(host, port, auth_timeout_s)
+    with _cmd_slot.lock:
+        device, state, detail = _cmd_slot.get(host, port, auth_timeout_s)
         if device is None:
             return False, state, detail, ""
         try:
             out = device.shell(command, transport_timeout_s=5.0,
                                read_timeout_s=5.0)
             return True, "connected", "", out or ""
-        except Exception as exc:  # noqa: BLE001 - 重试也失败
-            _drop_device()
+        except (adb_exc.AdbConnectionError, adb_exc.AdbTimeoutError,
+                OSError):
+            # 连接断了：丢掉旧连接，重连一次再跑
+            _cmd_slot.drop()
+            device, state, detail = _cmd_slot.get(host, port, auth_timeout_s)
+            if device is None:
+                return False, state, detail, ""
+            try:
+                out = device.shell(command, transport_timeout_s=5.0,
+                                   read_timeout_s=5.0)
+                return True, "connected", "", out or ""
+            except Exception as exc:  # noqa: BLE001 - 重试也失败
+                _cmd_slot.drop()
+                return False, "error", "发命令失败：%s" % exc, ""
+        except Exception as exc:  # noqa: BLE001 - 兜底
+            _cmd_slot.drop()
             return False, "error", "发命令失败：%s" % exc, ""
-    except Exception as exc:  # noqa: BLE001 - 兜底
-        _drop_device()
-        return False, "error", "发命令失败：%s" % exc, ""
 
 
 def send_key(key_name):
@@ -578,7 +624,7 @@ def send_key(key_name):
     if not host:
         return False, "not_configured", STATE_TEXT["not_configured"]
     ok, state, detail, _out = _run_shell_once(
-        host, port, "input keyevent %s" % code, auth_timeout_s=5.0)
+        host, port, "input keyevent %s" % code)
     if ok:
         _set_status("connected")
     elif state in STATE_TEXT:
@@ -596,32 +642,36 @@ def test_connection():
         return {"ok": False, "state": "not_configured",
                 "error": STATE_TEXT["not_configured"], "ms": 0, "model": ""}
     started = time.time()
-    _drop_device()
-    device, state, detail = _adb_connect(host, port, auth_timeout_s=10.0)
-    ms = int((time.time() - started) * 1000)
-    if device is None:
-        _set_status(state, detail, latency_ms=ms)
-        return {"ok": False, "state": state,
-                "error": detail or STATE_TEXT.get(state, ""),
-                "ms": ms, "model": ""}
-    model = ""
-    try:
-        out = device.shell("getprop ro.product.model",
-                           transport_timeout_s=5.0, read_timeout_s=5.0)
-        model = (out or "").strip()
-    except Exception:  # noqa: BLE001 - 型号读不到不影响“已连接”
+    with _cmd_slot.lock:
+        _cmd_slot.drop()
+        device, state, detail = _cmd_slot.get(host, port, auth_timeout_s=10.0)
+        ms = int((time.time() - started) * 1000)
+        if device is None:
+            _set_status(state, detail, latency_ms=ms)
+            return {"ok": False, "state": state,
+                    "error": detail or STATE_TEXT.get(state, ""),
+                    "ms": ms, "model": ""}
         model = ""
-    global _device, _device_target
-    with _device_lock:
-        _device = device
-        _device_target = (host, port)
-    _set_status("connected", model=model, latency_ms=ms)
-    return {"ok": True, "state": "connected", "error": "", "ms": ms,
-            "model": model}
+        try:
+            out = device.shell("getprop ro.product.model",
+                               transport_timeout_s=5.0, read_timeout_s=5.0)
+            model = (out or "").strip()
+        except Exception:  # noqa: BLE001 - 型号读不到不影响“已连接”
+            model = ""
+        _set_status("connected", model=model, latency_ms=ms)
+        return {"ok": True, "state": "connected", "error": "", "ms": ms,
+                "model": model}
 
 
 # --------------------------------------------------------------------------
 # 电视画面截图：ADB screencap，每 2 秒自动刷新一张（前端节流）
+#
+# 真机上单次 ADB 命令本身就慢（实测按键约 2 秒），截图传输更大、更
+# 容易超：截图的超时要放得比按键宽得多。一次超时只说明这一种方法不
+# 行，兜底链会换下一种方法继续试，不会一次超时就直接报错。三种方法
+# 依次兜底：exec-out 直接拿原始字节 → shell + base64（文本通道）→
+# 落文件再读（绕开 stdout，兼容性最强）。失败时界面上给一句具体的
+# 原因（三种方法各卡在哪），详细原因同时写进服务端日志方便排障。
 # --------------------------------------------------------------------------
 
 PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
@@ -629,38 +679,143 @@ PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
 # 同一时间只跑一张截图：上一张没回来时新请求直接报 busy，不排队堆积。
 _screenshot_lock = threading.Lock()
 
+# 真机 screencap 可能要 1–3 秒甚至更久：单次读超时放宽到 10 秒，
+# 单种方法总超时放宽到 25 秒（按键仍是 5 秒，截图不走按键通道）。
+_SHOT_TRANSPORT_TIMEOUT_S = 10.0
+_SHOT_READ_TIMEOUT_S = 25.0
+# 落文件截图的候选路径（/sdcard 有的机型不可写时换 /data/local/tmp）
+_SHOT_FILE_PATHS = ("/sdcard/mitvremote_shot.png",
+                    "/data/local/tmp/mitvremote_shot.png")
 
-def _screenshot_from_device(device):
-    """从已连接设备取一帧截图，返回 PNG 字节；失败返回 None。
 
-    首选 exec-out 直接拿原始字节（不经过 shell 的换行处理）；
-    拿不到合法 PNG 时兜底走 shell + base64（安卓自带 base64 工具，
-    文本通道不会损坏二进制）。adb-shell 的 shell() 默认把输出当
-    文本解码，二进制 PNG 走它会损坏，所以绝不用 shell() 直接取图。
-    """
+class _ShotConnectionError(Exception):
+    """截图中途连接断了：调用方应重连一次再试。"""
+
+
+def _validate_png(raw):
+    return raw if raw and raw.startswith(PNG_MAGIC) else None
+
+
+def _shot_exec_out(device):
+    """方法 1：exec-out 直接拿原始字节。返回 (png, 失败原因)。"""
+    from adb_shell import exceptions as adb_exc
     try:
-        raw = device.exec_out("screencap -p", transport_timeout_s=5.0,
-                              read_timeout_s=10.0, decode=False)
-    except Exception:  # noqa: BLE001 - 连接断了就交给兜底/调用方处理
-        raw = None
-    if raw and raw.startswith(PNG_MAGIC):
-        return raw
-    out = device.shell("screencap -p | base64",
-                       transport_timeout_s=5.0, read_timeout_s=10.0)
+        raw = device.exec_out("screencap -p",
+                              transport_timeout_s=_SHOT_TRANSPORT_TIMEOUT_S,
+                              read_timeout_s=_SHOT_READ_TIMEOUT_S,
+                              decode=False)
+    except (adb_exc.AdbTimeoutError, adb_exc.TcpTimeoutException):
+        # 超时只说明这台电视慢，换下一种方法继续试，不直接报错。
+        return None, "超时（%s 秒无响应）" % _SHOT_READ_TIMEOUT_S
+    except (adb_exc.AdbConnectionError, OSError) as exc:
+        raise _ShotConnectionError("exec-out 连接异常：%s" % exc)
+    except Exception as exc:  # noqa: BLE001 - 兜底
+        return None, "出错：%s" % exc
+    if _validate_png(raw) is not None:
+        return raw, ""
+    return None, "未返回有效图片"
+
+
+def _shot_base64(device):
+    """方法 2：shell + base64（文本通道，不损坏二进制）。"""
+    from adb_shell import exceptions as adb_exc
+    try:
+        out = device.shell("screencap -p | base64",
+                           transport_timeout_s=_SHOT_TRANSPORT_TIMEOUT_S,
+                           read_timeout_s=_SHOT_READ_TIMEOUT_S)
+    except (adb_exc.AdbTimeoutError, adb_exc.TcpTimeoutException):
+        return None, "超时（%s 秒无响应）" % _SHOT_READ_TIMEOUT_S
+    except (adb_exc.AdbConnectionError, OSError) as exc:
+        raise _ShotConnectionError("base64 连接异常：%s" % exc)
+    except Exception as exc:  # noqa: BLE001 - 兜底
+        return None, "出错：%s" % exc
     if not out:
-        return None
+        return None, "未返回数据"
     try:
         raw = base64.b64decode("".join(out.split()))
     except Exception:  # noqa: BLE001 - 不是合法 base64
-        return None
-    if raw.startswith(PNG_MAGIC):
-        return raw
-    return None
+        return None, "解码失败"
+    if _validate_png(raw) is not None:
+        return raw, ""
+    return None, "未返回有效图片"
+
+
+def _shot_file(device):
+    """方法 3：落文件再读（绕开 stdout，兼容性最强）。"""
+    from adb_shell import exceptions as adb_exc
+    for path in _SHOT_FILE_PATHS:
+        try:
+            device.shell("screencap %s" % path,
+                         transport_timeout_s=_SHOT_TRANSPORT_TIMEOUT_S,
+                         read_timeout_s=_SHOT_READ_TIMEOUT_S)
+        except (adb_exc.AdbTimeoutError, adb_exc.TcpTimeoutException):
+            # 写出超时：文件可能已生成，继续用 test -f 确认一次
+            pass
+        except (adb_exc.AdbConnectionError, OSError) as exc:
+            raise _ShotConnectionError("落文件连接异常：%s" % exc)
+        except Exception as exc:  # noqa: BLE001 - 兜底
+            return None, "写出出错：%s" % exc
+        try:
+            out = device.shell("test -f %s && echo OK" % path,
+                               transport_timeout_s=5.0, read_timeout_s=5.0)
+        except (adb_exc.AdbTimeoutError, adb_exc.TcpTimeoutException):
+            continue  # 该路径确认超时，换下一个路径
+        except (adb_exc.AdbConnectionError, OSError) as exc:
+            raise _ShotConnectionError("落文件连接异常：%s" % exc)
+        except Exception as exc:  # noqa: BLE001 - 兜底
+            return None, "检查出错：%s" % exc
+        if "OK" not in (out or ""):
+            continue  # 该路径写不出，换下一个路径
+        raw = None
+        try:
+            raw = device.exec_out("cat %s" % path,
+                                  transport_timeout_s=_SHOT_TRANSPORT_TIMEOUT_S,
+                                  read_timeout_s=_SHOT_READ_TIMEOUT_S,
+                                  decode=False)
+        except (adb_exc.AdbTimeoutError, adb_exc.TcpTimeoutException):
+            raw = None  # cat 超时，改走 base64 读
+        except (adb_exc.AdbConnectionError, OSError) as exc:
+            raise _ShotConnectionError("落文件连接异常：%s" % exc)
+        except Exception:  # noqa: BLE001 - exec-out cat 失败就走 base64
+            raw = None
+        if _validate_png(raw) is None:
+            try:
+                out = device.shell("base64 %s" % path,
+                                   transport_timeout_s=_SHOT_TRANSPORT_TIMEOUT_S,
+                                   read_timeout_s=_SHOT_READ_TIMEOUT_S)
+                raw = base64.b64decode("".join((out or "").split()))
+            except (adb_exc.AdbTimeoutError, adb_exc.TcpTimeoutException):
+                raw = None
+            except (adb_exc.AdbConnectionError, OSError) as exc:
+                raise _ShotConnectionError("落文件连接异常：%s" % exc)
+            except Exception:  # noqa: BLE001 - 不是合法 base64
+                raw = None
+        try:
+            device.shell("rm -f %s" % path,
+                         transport_timeout_s=5.0, read_timeout_s=5.0)
+        except Exception:  # noqa: BLE001 - 清理失败无所谓
+            pass
+        if _validate_png(raw) is not None:
+            return raw, ""
+        return None, "读取未返回有效图片"
+    return None, "写出失败（%s 均不可写）" % "、".join(_SHOT_FILE_PATHS)
+
+
+def _screenshot_chain(device):
+    """依次试三种截图方法。返回 (png, 成功方法名, [各方法失败原因])。"""
+    failures = []
+    for name, method in (("exec-out", _shot_exec_out),
+                         ("base64", _shot_base64),
+                         ("落文件", _shot_file)):
+        png, reason = method(device)
+        if png is not None:
+            return png, name, failures
+        failures.append("%s（%s）" % (name, reason))
+    return None, "", failures
 
 
 def take_screenshot():
     """取一帧电视画面。返回 (png 或 None, state, detail)。"""
-    from adb_shell import exceptions as adb_exc
     cfg = get_config_copy()
     host = (cfg.get("tv_ip") or "").strip()
     port = cfg.get("tv_port") or DEFAULT_ADB_PORT
@@ -669,27 +824,31 @@ def take_screenshot():
     if not _screenshot_lock.acquire(blocking=False):
         return None, "busy", "上一张截图还没取完，稍后再试"
     try:
-        for _attempt in range(2):
-            device, state, detail = _get_device(host, port,
-                                                auth_timeout_s=5.0)
-            if device is None:
-                return None, state, detail
-            try:
-                png = _screenshot_from_device(device)
-            except (adb_exc.AdbConnectionError, adb_exc.AdbTimeoutError,
-                    OSError):
-                # 连接断了：丢掉旧连接，重连一次再取
-                _drop_device()
-                continue
-            except Exception as exc:  # noqa: BLE001 - 兜底
-                _drop_device()
-                return None, "error", "截图失败：%s" % exc
-            if png is not None:
-                _set_status("connected")
-                return png, "connected", ""
-            _drop_device()
-            return None, "error", "电视返回的截图不是有效图片，请重试"
-        return None, "error", "截图失败：连接已断开，请重试"
+        # 截图走自己的持久连接，与按键完全隔离：截图再慢、再失败也
+        # 挡不住按键；截图失败只丢截图连接，按键连接不受影响。
+        with _shot_slot.lock:
+            for _attempt in range(2):
+                device, state, detail = _shot_slot.get(
+                    host, port, auth_timeout_s=10.0)
+                if device is None:
+                    return None, state, detail
+                try:
+                    png, _method, failures = _screenshot_chain(device)
+                except _ShotConnectionError as exc:
+                    _shot_slot.drop()
+                    if _attempt == 0:
+                        continue  # 重连一次再试
+                    _log("screenshot %s:%s connection failed: %s"
+                         % (host, port, exc))
+                    return None, "error", "截图失败：连接已断开（%s），请重试" % exc
+                if png is not None:
+                    _set_status("connected")
+                    return png, "connected", ""
+                _shot_slot.drop()
+                detail = "截图失败：" + "；".join(failures)
+                _log("screenshot %s:%s failed: %s" % (host, port, detail))
+                return None, "error", detail
+            return None, "error", "截图失败：连接已断开，请重试"
     finally:
         _screenshot_lock.release()
 
@@ -1254,7 +1413,7 @@ class Handler(BaseHTTPRequestHandler):
                 _config["tv_port"] = tv_port
                 _config["tv_mac"] = tv_mac
             save_config()
-            _drop_device()
+            _drop_all_devices()
             _set_status("unknown", "")
             send_json(self, {"ok": True})
             return
