@@ -8,9 +8,12 @@
   4. 连接状态区分：connected / refused / awaiting_auth / not_configured
   5. WoL 幻数据包格式（FF*6 + MAC*16）与 MAC 校验
   6. 发现扫描逻辑（mock 在 127.0.0.1 网段）
+  7. 截图接口：exec-out 取合法 PNG、exec 失效时 base64 兜底、
+     失败回可读错误、服务端并发节流（busy 锁）
 
 运行：python3 tests/test_server.py
 """
+import base64
 import http.client
 import http.cookiejar
 import importlib.util
@@ -36,6 +39,10 @@ CNXN, AUTH, OPEN, OKAY, WRTE, CLSE = (
     b"CNXN", b"AUTH", b"OPEN", b"OKAY", b"WRTE", b"CLSE")
 AUTH_TOKEN, AUTH_SIGNATURE, AUTH_RSAPUBLICKEY = 1, 2, 3
 
+# 1x1 透明 PNG（mock 截图用，合法 PNG 魔数头）
+MOCK_PNG = base64.b64decode(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==")
+
 
 def _adb_msg(cmd, arg0, arg1, payload=b""):
     checksum = sum(payload) & 0xFFFFFFFF
@@ -60,6 +67,9 @@ class MockAdbServer:
     def __init__(self, mode):
         self.mode = mode
         self.commands = []  # 收到的 shell 命令
+        # 截图模式：ok（exec-out 返回合法 PNG）| fallback（exec 返回
+        # 垃圾，shell base64 兜底）| fail（两条路都拿不到合法 PNG）
+        self.screencap_mode = "ok"
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         self.sock.bind(("127.0.0.1", 0))
@@ -139,13 +149,38 @@ class MockAdbServer:
                 cmd_bytes = struct.pack("<I", cmd)
                 if cmd_bytes == OPEN:
                     dest = payload.rstrip(b"\x00").decode("utf-8", "replace")
-                    assert dest.startswith("shell:"), dest
-                    command = dest[len("shell:"):]
+                    if dest.startswith("shell:"):
+                        command = dest[len("shell:"):]
+                        kind = "shell"
+                    elif dest.startswith("exec:"):
+                        command = dest[len("exec:"):]
+                        kind = "exec"
+                    else:
+                        raise AssertionError(
+                            "mock adb: unexpected service %r" % dest)
                     self.commands.append(command)
                     local_id = a0
-                    conn.sendall(_adb_msg(OKAY, local_id, remote_id))
+                    # 服务端回包的 arg0 是服务端自己的 remote_id、arg1 是
+                    # 客户端的 local_id（adb-shell 的 args_match 就这么
+                    # 认；写反了第二条流起 OKAY 就对不上号、客户端等超时）。
+                    conn.sendall(_adb_msg(OKAY, remote_id, local_id))
                     if command.startswith("getprop ro.product.model"):
                         out = b"MiTV-MockModel\n"
+                    elif command.startswith("screencap"):
+                        if kind == "exec":
+                            if self.screencap_mode == "ok":
+                                out = MOCK_PNG
+                            elif self.screencap_mode == "fallback":
+                                out = b"not-a-png"
+                            else:  # fail
+                                out = b""
+                        else:  # shell: screencap -p | base64
+                            if self.screencap_mode == "fallback":
+                                out = base64.b64encode(MOCK_PNG) + b"\n"
+                            elif self.screencap_mode == "fail":
+                                out = b""
+                            else:
+                                out = base64.b64encode(MOCK_PNG) + b"\n"
                     else:
                         out = b""
                     conn.sendall(_adb_msg(WRTE, remote_id, local_id, out))
@@ -153,6 +188,11 @@ class MockAdbServer:
                 elif cmd_bytes == CLSE:
                     continue
                 elif cmd_bytes == WRTE:
+                    continue
+                elif cmd_bytes == OKAY:
+                    # 客户端收到 WRTE 后回的流控确认（ADB 协议规定），
+                    # 真机 adbd 会正常收下：忽略。没有这条，同一条
+                    # 连接上的第二条命令会因 mock 关连接而断掉。
                     continue
                 else:
                     return
@@ -412,6 +452,93 @@ def test_http(mock_auth):
     return h
 
 
+def test_screenshot(h, mock_auth):
+    def parse_json(raw):
+        try:
+            return json.loads(raw.decode("utf-8"))
+        except ValueError:
+            return {"_unparsable": raw[:200]}
+
+    # 1. 截图接口须登录
+    h_anon = Http()
+    status, raw = h_anon.req("GET", "/api/screenshot")
+    check("未登录截图接口回 401", status == 401, "status=%s" % status)
+    # 2. 首页含电视画面区
+    status, raw = h.get("/")
+    check("首页含电视画面区",
+          status == 200 and b'id="shot-img"' in raw
+          and b'id="btn-shot-toggle"' in raw
+          and b'id="shot-wrap"' in raw
+          and "电视画面".encode("utf-8") in raw, "status=%s" % status)
+    # 3. exec-out 通道返回合法 PNG
+    before = len(mock_auth.commands)
+    status, raw = h.req("GET", "/api/screenshot")
+    check("截图接口 200 返回 PNG",
+          status == 200 and raw[:8] == b"\x89PNG\r\n\x1a\n",
+          "status=%s len=%d" % (status, len(raw)))
+    check("截图内容就是 mock 的 PNG", raw == MOCK_PNG,
+          "len=%d" % len(raw))
+    check("截图走了 exec-out（screencap -p）",
+          mock_auth.commands[before:] == ["screencap -p"],
+          str(mock_auth.commands[before:]))
+    # 4. exec 失效时 base64 兜底仍返回合法 PNG
+    mock_auth.screencap_mode = "fallback"
+    before = len(mock_auth.commands)
+    status, raw = h.req("GET", "/api/screenshot")
+    check("exec 失效时 base64 兜底仍返回合法 PNG",
+          status == 200 and raw == MOCK_PNG,
+          "status=%s len=%d" % (status, len(raw)))
+    check("兜底走了 shell screencap -p | base64",
+          mock_auth.commands[before:] == ["screencap -p",
+                                          "screencap -p | base64"],
+          str(mock_auth.commands[before:]))
+    mock_auth.screencap_mode = "ok"
+    # 5. 两条路都失败：回 JSON 可读错误，不带堆栈
+    mock_auth.screencap_mode = "fail"
+    status, raw = h.req("GET", "/api/screenshot")
+    data = parse_json(raw)
+    check("截图失败回 JSON 可读错误",
+          status == 503 and not data.get("ok") and data.get("error")
+          and "不是有效图片" in data.get("error", "")
+          and "Traceback" not in raw.decode("utf-8", "replace"),
+          "status=%s %s" % (status, str(data)[:200]))
+    mock_auth.screencap_mode = "ok"
+    # 6. 节流：服务端正忙时直接报 busy（429），不排队
+    app._screenshot_lock.acquire()
+    try:
+        status, raw = h.req("GET", "/api/screenshot")
+        data = parse_json(raw)
+    finally:
+        app._screenshot_lock.release()
+    check("截图进行中再请求报 busy（429）",
+          status == 429 and data.get("state") == "busy",
+          "status=%s %s" % (status, str(data)[:200]))
+    # 7. 未配置电视
+    h.json("POST", "/api/settings",
+           {"tv_name": "客厅电视", "tv_ip": "", "tv_port": mock_auth.port,
+            "tv_mac": ""})
+    status, raw = h.req("GET", "/api/screenshot")
+    data = parse_json(raw)
+    check("未配电视截图回 not_configured",
+          not data.get("ok") and data.get("state") == "not_configured",
+          str(data))
+    # 8. 连接被拒
+    h.json("POST", "/api/settings",
+           {"tv_name": "客厅电视", "tv_ip": "127.0.0.1", "tv_port": 59999,
+            "tv_mac": ""})
+    status, raw = h.req("GET", "/api/screenshot")
+    data = parse_json(raw)
+    check("连不上电视截图回 refused",
+          not data.get("ok") and data.get("state") == "refused", str(data))
+    # 9. 恢复设置后截图正常
+    h.json("POST", "/api/settings",
+           {"tv_name": "客厅电视", "tv_ip": "127.0.0.1",
+            "tv_port": mock_auth.port, "tv_mac": "AA:BB:CC:DD:EE:FF"})
+    status, raw = h.req("GET", "/api/screenshot")
+    check("恢复后截图正常", status == 200 and raw == MOCK_PNG,
+          "status=%s" % status)
+
+
 def test_states(h, mock_auth, mock_never):
     # refused：指一个没开的端口
     status, data = h.json("POST", "/api/settings",
@@ -503,6 +630,8 @@ def main():
     print("http on 127.0.0.1:%d (data dir %s)" % (HTTP_PORT, TMPDATA))
     print("== HTTP 测试 ==")
     h = test_http(mock_auth)
+    print("== 截图测试 ==")
+    test_screenshot(h, mock_auth)
     print("== 状态区分测试 ==")
     test_states(h, mock_auth, mock_never)
     print("== 发现扫描测试 ==")

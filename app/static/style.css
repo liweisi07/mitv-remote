@@ -88,6 +88,22 @@ body {
 .row-btns button:active { transform: scale(.95); background: #2e475e; }
 .row-btns button:disabled { opacity: .45; }
 
+/* 电视画面截图 */
+.shot-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px; }
+.shot-title { font-size: 16px; font-weight: 600; }
+.btn.small { height: 34px; padding: 0 14px; font-size: 14px; }
+.shot-wrap {
+  position: relative; aspect-ratio: 16 / 9; background: #000;
+  border-radius: 10px; overflow: hidden; cursor: pointer;
+}
+.shot-wrap img { width: 100%; height: 100%; object-fit: contain; display: block; }
+.shot-placeholder {
+  position: absolute; inset: 0; display: flex; align-items: center;
+  justify-content: center; color: #98a2b3; font-size: 14px; text-align: center;
+  padding: 0 16px; line-height: 1.6;
+}
+.shot-sub { font-size: 13px; color: #98a2b3; margin-top: 8px; }
+
 /* 表单 */
 .field { margin-bottom: 12px; }
 .field label { display: block; font-size: 14px; color: #d0d5dd; margin-bottom: 6px; }

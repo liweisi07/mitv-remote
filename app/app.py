@@ -3,7 +3,9 @@
 
 用 ADB 控制同一局域网内的小米电视：手机浏览器打开就是遥控器，
 大按钮发按键（电源、音量、换台、方向盘、确认、返回、主页、菜单、
-信号源、静音），关机状态下可发局域网唤醒（WoL）开机。
+信号源、静音），关机状态下可发局域网唤醒（WoL）开机。遥控页顶部
+还有“电视画面”截图预览：ADB 截图每 2 秒自动刷新一张，点画面
+手动刷新，可暂停（实时流畅视频做不到，ADB 截图本身就慢）。
 
   * 不依赖 NAS 上装 adb：纯 Python 的 adb-shell（0.4.4）+ rsa
     （4.9.1）+ pyasn1（0.6.5）全部 vendored 在 app/vendor/ 里，
@@ -56,7 +58,7 @@ STATIC_DIR = os.path.join(APP_DIR, "static")
 sys.path.insert(0, VENDOR_DIR)
 sys.path.insert(0, APP_DIR)
 
-VERSION = "1.0.0"
+VERSION = "1.0.1"
 APPNAME = "mitvremote"
 DEFAULT_PORT = 18091
 DEFAULT_ADB_PORT = 5555
@@ -619,6 +621,80 @@ def test_connection():
 
 
 # --------------------------------------------------------------------------
+# 电视画面截图：ADB screencap，每 2 秒自动刷新一张（前端节流）
+# --------------------------------------------------------------------------
+
+PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
+
+# 同一时间只跑一张截图：上一张没回来时新请求直接报 busy，不排队堆积。
+_screenshot_lock = threading.Lock()
+
+
+def _screenshot_from_device(device):
+    """从已连接设备取一帧截图，返回 PNG 字节；失败返回 None。
+
+    首选 exec-out 直接拿原始字节（不经过 shell 的换行处理）；
+    拿不到合法 PNG 时兜底走 shell + base64（安卓自带 base64 工具，
+    文本通道不会损坏二进制）。adb-shell 的 shell() 默认把输出当
+    文本解码，二进制 PNG 走它会损坏，所以绝不用 shell() 直接取图。
+    """
+    try:
+        raw = device.exec_out("screencap -p", transport_timeout_s=5.0,
+                              read_timeout_s=10.0, decode=False)
+    except Exception:  # noqa: BLE001 - 连接断了就交给兜底/调用方处理
+        raw = None
+    if raw and raw.startswith(PNG_MAGIC):
+        return raw
+    out = device.shell("screencap -p | base64",
+                       transport_timeout_s=5.0, read_timeout_s=10.0)
+    if not out:
+        return None
+    try:
+        raw = base64.b64decode("".join(out.split()))
+    except Exception:  # noqa: BLE001 - 不是合法 base64
+        return None
+    if raw.startswith(PNG_MAGIC):
+        return raw
+    return None
+
+
+def take_screenshot():
+    """取一帧电视画面。返回 (png 或 None, state, detail)。"""
+    from adb_shell import exceptions as adb_exc
+    cfg = get_config_copy()
+    host = (cfg.get("tv_ip") or "").strip()
+    port = cfg.get("tv_port") or DEFAULT_ADB_PORT
+    if not host:
+        return None, "not_configured", STATE_TEXT["not_configured"]
+    if not _screenshot_lock.acquire(blocking=False):
+        return None, "busy", "上一张截图还没取完，稍后再试"
+    try:
+        for _attempt in range(2):
+            device, state, detail = _get_device(host, port,
+                                                auth_timeout_s=5.0)
+            if device is None:
+                return None, state, detail
+            try:
+                png = _screenshot_from_device(device)
+            except (adb_exc.AdbConnectionError, adb_exc.AdbTimeoutError,
+                    OSError):
+                # 连接断了：丢掉旧连接，重连一次再取
+                _drop_device()
+                continue
+            except Exception as exc:  # noqa: BLE001 - 兜底
+                _drop_device()
+                return None, "error", "截图失败：%s" % exc
+            if png is not None:
+                _set_status("connected")
+                return png, "connected", ""
+            _drop_device()
+            return None, "error", "电视返回的截图不是有效图片，请重试"
+        return None, "error", "截图失败：连接已断开，请重试"
+    finally:
+        _screenshot_lock.release()
+
+
+# --------------------------------------------------------------------------
 # 局域网唤醒（WoL）
 # --------------------------------------------------------------------------
 
@@ -1062,6 +1138,17 @@ class Handler(BaseHTTPRequestHandler):
                 "latency_ms": st["latency_ms"],
                 "checked_at": st["checked_at"],
             })
+        elif path == "/api/screenshot":
+            png, state, detail = take_screenshot()
+            if png is not None:
+                send_bytes(self, png, "image/png", extra_headers=[
+                    ("Cache-Control", "no-store, no-cache")])
+            else:
+                # 成功返回 PNG，失败返回 JSON（前端按 Content-Type 区分）。
+                status = 429 if state == "busy" else (
+                    200 if state == "not_configured" else 503)
+                send_json(self, {"ok": False, "state": state,
+                                 "error": detail}, status=status)
         elif path == "/api/settings":
             cfg = get_config_copy()
             send_json(self, {

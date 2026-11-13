@@ -104,6 +104,17 @@ def main():
           "mock got:", mock.commands[before:])
     assert data.get("ok")
     assert mock.commands[before:] == ["input keyevent KEYCODE_VOLUME_UP"]
+    # 4b. 截图接口：从已安装布局取一帧 PNG
+    req = urllib.request.Request(
+        "http://127.0.0.1:%d/api/screenshot" % PORT)
+    with opener.open(req, timeout=30) as resp:
+        shot_status = resp.status
+        shot_ct = resp.headers.get("Content-Type", "")
+        shot_body = resp.read()
+    print("screenshot ->", shot_status, shot_ct, "len=%d" % len(shot_body))
+    assert shot_status == 200 and shot_ct.startswith("image/png")
+    assert shot_body[:8] == b"\x89PNG\r\n\x1a\n"
+    assert mock.commands[before + 1:] == ["screencap -p"]
     # 5. main stop + status 应为 3（未运行）
     r = sh("sh", os.path.join(INST, "cmd", "main"), "stop")
     print("main stop rc=%d" % r.returncode)

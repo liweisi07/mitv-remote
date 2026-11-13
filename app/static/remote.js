@@ -40,6 +40,16 @@
     if (state === 'not_configured') {
       statusSub.textContent += ' — 点右上角“设置”填写';
     }
+    // 电视画面：刚连上立刻取一张；断开时回占位提示（有图保留最后一张）。
+    var wasConnected = lastState === 'connected';
+    lastState = state;
+    if (state === 'connected' && !wasConnected && !shotPaused) {
+      refreshShot(false);
+    }
+    if (state !== 'connected' && shotImg.classList.contains('hidden')) {
+      showShotPlaceholder(state === 'not_configured'
+        ? '未配置电视：请先在设置页填电视 IP' : '未连接电视');
+    }
   }
 
   function refreshStatus() {
@@ -48,6 +58,121 @@
       .then(function (data) { renderStatus(data); })
       .catch(function () { statusText.textContent = '拿不到状态，请检查网络'; });
   }
+
+  // ---- 电视画面截图：每 2 秒自动刷新一张 ----
+  var shotImg = document.getElementById('shot-img');
+  var shotPlaceholder = document.getElementById('shot-placeholder');
+  var shotSub = document.getElementById('shot-sub');
+  var shotToggle = document.getElementById('btn-shot-toggle');
+  var shotWrap = document.getElementById('shot-wrap');
+  var lastState = 'unknown';
+  var shotPaused = false;
+  var shotBusy = false;
+  var shotTimer = null;
+  var shotObjectUrl = null;
+
+  function shotTime() {
+    var d = new Date();
+    function p(n) { return (n < 10 ? '0' : '') + n; }
+    return p(d.getHours()) + ':' + p(d.getMinutes()) + ':' + p(d.getSeconds());
+  }
+  function showShotPlaceholder(text) {
+    shotPlaceholder.textContent = text;
+    shotPlaceholder.classList.remove('hidden');
+    shotImg.classList.add('hidden');
+  }
+  function showShotImage(url) {
+    if (shotObjectUrl && shotObjectUrl !== url) {
+      try { URL.revokeObjectURL(shotObjectUrl); } catch (e) {}
+    }
+    shotObjectUrl = url;
+    shotImg.src = url;
+    shotImg.classList.remove('hidden');
+    shotPlaceholder.classList.add('hidden');
+  }
+  function blobToUrl(blob, done) {
+    if (window.URL && URL.createObjectURL) {
+      done(URL.createObjectURL(blob));
+    } else if (window.FileReader) {
+      var reader = new FileReader();
+      reader.onload = function () { done(reader.result); };
+      reader.onerror = function () { done(null); };
+      reader.readAsDataURL(blob);
+    } else {
+      done(null);
+    }
+  }
+  function refreshShot(manual) {
+    // 节流：上一张还没回来就跳过本次，不并发堆积。
+    if (shotBusy) return;
+    // 自动刷新只在已连接时跑；手动点按（点画面）只要不是明确未配置就试一次。
+    if (!manual && (shotPaused || lastState !== 'connected')) return;
+    if (manual && lastState === 'not_configured') {
+      showShotPlaceholder('未配置电视：请先在设置页填电视 IP');
+      shotSub.textContent = '未配置电视：请先在设置页填电视 IP';
+      return;
+    }
+    shotBusy = true;
+    fetch('/api/screenshot', { cache: 'no-store' })
+      .then(function (resp) {
+        var ctype = (resp.headers.get('Content-Type') || '');
+        if (ctype.indexOf('image/') === 0) {
+          return resp.blob().then(function (blob) {
+            return { image: true, blob: blob };
+          });
+        }
+        return resp.json().then(function (data) {
+          return { image: false, error: (data && data.error) || '截图失败' };
+        });
+      })
+      .then(function (result) {
+        if (result.image) {
+          blobToUrl(result.blob, function (url) {
+            if (url) {
+              showShotImage(url);
+              shotSub.textContent = '已更新 ' + shotTime()
+                + (shotPaused ? ' · 已暂停自动刷新' : ' · 每 2 秒自动刷新');
+            } else {
+              shotSub.textContent = '截图已取到，但浏览器无法显示';
+            }
+          });
+        } else {
+          // 失败不刷屏：只在画面下方留一句话，有图时保留上一张。
+          shotSub.textContent = result.error;
+          if (shotImg.classList.contains('hidden')) {
+            showShotPlaceholder(result.error);
+          }
+        }
+      })
+      .catch(function () {
+        shotSub.textContent = '截图失败，请检查网络';
+        if (shotImg.classList.contains('hidden')) {
+          showShotPlaceholder('截图失败，请检查网络');
+        }
+      })
+      .then(function () { shotBusy = false; });
+  }
+  function startShotTimer() {
+    if (shotTimer) return;
+    shotTimer = setInterval(function () { refreshShot(false); }, 2000);
+  }
+  function stopShotTimer() {
+    if (shotTimer) { clearInterval(shotTimer); shotTimer = null; }
+  }
+  shotToggle.addEventListener('click', function () {
+    shotPaused = !shotPaused;
+    if (shotPaused) {
+      // 暂停立即生效：停掉定时器，正在取的那张取完即止。
+      stopShotTimer();
+      shotToggle.textContent = '▶ 继续';
+      shotSub.textContent = '已暂停自动刷新（点画面仍可手动刷新）';
+    } else {
+      shotToggle.textContent = '⏸ 暂停';
+      refreshShot(true);
+      startShotTimer();
+    }
+  });
+  shotWrap.addEventListener('click', function () { refreshShot(true); });
 
   function postJson(url, body) {
     return fetch(url, {
@@ -145,6 +270,7 @@
 
   refreshStatus();
   setInterval(refreshStatus, 15000);
+  startShotTimer();
   if ('serviceWorker' in navigator) {
     navigator.serviceWorker.register('/sw.js').catch(function () {});
   }
