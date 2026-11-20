@@ -58,7 +58,7 @@ STATIC_DIR = os.path.join(APP_DIR, "static")
 sys.path.insert(0, VENDOR_DIR)
 sys.path.insert(0, APP_DIR)
 
-VERSION = "1.0.3"
+VERSION = "1.0.4"
 APPNAME = "mitvremote"
 DEFAULT_PORT = 18091
 DEFAULT_ADB_PORT = 5555

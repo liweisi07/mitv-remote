@@ -48,8 +48,10 @@
 
 ```sh
 scripts/build_fnpack.sh [arm|x86]   # 默认 arm，打包到 dist/
-python3 scripts/verify_fpk.py dist/mitvremote-1.0.3-arm64.fpk
+python3 scripts/verify_fpk.py dist/mitvremote-1.0.4-arm64.fpk
 ```
+
+- 1.0.4：开发者改为可乐冰，点开发者可打开博客；发布者同步改为可乐冰。
 
 ## 已知限制
 
