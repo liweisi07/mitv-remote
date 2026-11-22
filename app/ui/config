@@ -1,1 +1,1 @@
-{".url":{"mitvremote.main":{"allUsers":true,"icon":"images/icon_{0}.png","port":"18091","protocol":"http","title":"小米电视遥控","type":"iframe","url":"/"}}}
+{".url":{"mitvremote.main":{"allUsers":true,"icon":"images/icon_{0}.png","port":"18091","protocol":"http","title":"小米电视遥控","type":"url","url":"https://mitv.lolivx.com:56789"}}}
