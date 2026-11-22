@@ -1,7 +1,7 @@
 /* 小米电视遥控 — Service Worker */
 // 缓存名必须跟版本号走（mitvremote-v<版本>）：升级后旧缓存的 JS 会
 // 让页面上的按钮成摆设。发版改版本号时务必同步改这里。
-var CACHE_NAME = 'mitvremote-v1.0.4';
+var CACHE_NAME = 'mitvremote-v1.0.5';
 // 只预缓存公开静态资源；/ 与 /settings 要登录，不预缓存，页面一律走网络。
 var APP_SHELL = [
   '/static/style.css',
